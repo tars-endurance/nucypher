@@ -112,10 +112,7 @@ def _fetch_chainlist(domain_name: str) -> Dict[int, List[str]]:
         branch=_CHAINLIST_BRANCH,
         domain=domain_name,
     )
-    logger.info(
-        "Fetching public RPC endpoints from {url}",
-        url=url,
-    )
+    logger.info(f"Fetching public RPC endpoints from {url}")
 
     try:
         req = urllib.request.Request(
@@ -127,11 +124,7 @@ def _fetch_chainlist(domain_name: str) -> Dict[int, List[str]]:
 
             raw = _json.loads(resp.read().decode())
     except Exception as e:
-        logger.warn(
-            "Failed to fetch chainlist for {domain}: {error}",
-            domain=domain_name,
-            error=str(e),
-        )
+        logger.warn(f"Failed to fetch chainlist for {domain_name}: {e}")
         return {}
 
     # Keys are string chain IDs, values are lists of URLs
@@ -145,9 +138,8 @@ def _fetch_chainlist(domain_name: str) -> Dict[int, List[str]]:
             endpoints[chain_id] = [u for u in urls if isinstance(u, str)]
 
     logger.info(
-        "Loaded {count} chains from chainlist ({total} total endpoints)",
-        count=len(endpoints),
-        total=sum(len(v) for v in endpoints.values()),
+        f"Loaded {len(endpoints)} chains from chainlist "
+        f"({sum(len(v) for v in endpoints.values())} total endpoints)"
     )
     return endpoints
 
@@ -191,10 +183,8 @@ def _enrich_with_chainlist(
 
     if added:
         logger.info(
-            "Enriched operator endpoints with {added} public RPCs from chainlist"
-            " (max {max} per chain)",
-            added=added,
-            max=max_per_chain,
+            f"Enriched operator endpoints with {added} public RPCs "
+            f"from chainlist (max {max_per_chain} per chain)"
         )
     return enriched
 
@@ -344,22 +334,14 @@ class RPCProxyHealthCheck:
                 cache_hits = stats.get("cache_hits", 0)
                 cache_misses = stats.get("cache_misses", 0)
                 errors = stats.get("errors", 0)
+                pid = self._proxy._process.pid
                 self.log.info(
-                    "eRPC proxy: {delta} reqs (total: {total}), "
-                    "cache {hits}/{misses} hit/miss, {errors} errors, "
-                    "PID {pid}",
-                    delta=delta,
-                    total=total_reqs,
-                    hits=cache_hits,
-                    misses=cache_misses,
-                    errors=errors,
-                    pid=self._proxy._process.pid,
+                    f"eRPC proxy: {delta} reqs (total: {total_reqs}), "
+                    f"cache {cache_hits}/{cache_misses} hit/miss, "
+                    f"{errors} errors, PID {pid}"
                 )
         else:
-            self.log.debug(
-                "eRPC proxy alive (PID {pid})",
-                pid=self._proxy._process.pid,
-            )
+            self.log.debug(f"eRPC proxy alive (PID {self._proxy._process.pid})")
 
     def _scrape_stats(self) -> Optional[Dict[str, int]]:
         """Scrape key counters from eRPC's Prometheus metrics endpoint."""
@@ -392,9 +374,7 @@ class RPCProxyHealthCheck:
         return stats if stats else None
 
     def _handle_error(self, failure) -> None:
-        self.log.warn(
-            "eRPC health check error:\n{tb}", tb=failure.getTraceback().rstrip()
-        )
+        self.log.warn(f"eRPC health check error:\n{failure.getTraceback().rstrip()}")
 
 
 class RPCProxy:
@@ -565,16 +545,12 @@ class RPCProxy:
             self._fallback()
             return False
 
-        self.log.info(
-            "eRPC proxy process started (PID {pid})",
-            pid=self._process.pid,
-        )
+        self.log.info(f"eRPC proxy process started (PID {self._process.pid})")
 
         if background:
             self.log.info(
-                "Waiting for eRPC health in background (up to {timeout}s) — "
-                "Ursula continues with direct endpoints until ready",
-                timeout=health_timeout,
+                f"Waiting for eRPC health in background (up to {health_timeout}s) — "
+                f"Ursula continues with direct endpoints until ready"
             )
             import threading
             t = threading.Thread(
@@ -594,18 +570,15 @@ class RPCProxy:
             self._process.wait_for_health(timeout=timeout)
         except Exception as e:
             self.log.warn(
-                "eRPC proxy did not become healthy within {timeout}s — "
-                "continuing with direct endpoints. Error: {error}",
-                timeout=timeout,
-                error=str(e),
+                f"eRPC proxy did not become healthy within {timeout}s — "
+                f"continuing with direct endpoints. Error: {e}"
             )
             return
 
         # Hot-swap endpoints to route through the proxy
         self._activate_endpoints()
         self.log.info(
-            "eRPC proxy is healthy — endpoints hot-swapped to proxy (PID {pid})",
-            pid=self._process.pid,
+            f"eRPC proxy is healthy — endpoints hot-swapped to proxy (PID {self._process.pid})"
         )
 
     def _activate_endpoints(self) -> None:
@@ -644,10 +617,7 @@ class RPCProxy:
             return False
 
         self._activate_endpoints()
-        self.log.info(
-            "eRPC proxy active (PID {pid}), endpoints rewritten",
-            pid=self._process.pid,
-        )
+        self.log.info(f"eRPC proxy active (PID {self._process.pid}), endpoints rewritten")
         return True
 
     def stop(self) -> None:
@@ -660,8 +630,7 @@ class RPCProxy:
                 self.log.info("eRPC proxy stopped")
             except Exception:
                 self.log.warn(
-                    "Error stopping eRPC proxy:\n{tb}",
-                    tb=__import__('traceback').format_exc().rstrip(),
+                    f"Error stopping eRPC proxy:\n{__import__('traceback').format_exc().rstrip()}"
                 )
         self._fallback()
 

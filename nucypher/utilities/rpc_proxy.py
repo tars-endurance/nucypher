@@ -316,10 +316,14 @@ class RPCProxyHealthCheck:
         if self.running:
             self._task.stop()
 
+    MAX_RESTART_ATTEMPTS = 3
+
     def run(self) -> None:
         self._check_count += 1
         if not (self._proxy._process and self._proxy._process.is_running):
-            self.log.warn("eRPC proxy process is not running")
+            if self._proxy._active:
+                self.log.warn("eRPC proxy process died — attempting restart")
+                self._attempt_restart()
             return
 
         # Scrape lightweight stats from eRPC Prometheus metrics
@@ -372,6 +376,36 @@ class RPCProxyHealthCheck:
             elif "erpc_errors_total" in line and "{" not in line:
                 stats["errors"] = int(float(line.split()[-1]))
         return stats if stats else None
+
+    def _attempt_restart(self) -> None:
+        """Try to restart the eRPC process when it dies unexpectedly."""
+        if not hasattr(self, '_restart_count'):
+            self._restart_count = 0
+
+        self._restart_count += 1
+        if self._restart_count > self.MAX_RESTART_ATTEMPTS:
+            self.log.error(
+                f"eRPC proxy has died {self._restart_count} times — "
+                f"giving up. Ursula is running without RPC proxy. "
+                f"Manual restart required."
+            )
+            return
+
+        try:
+            from erpc import ERPCProcess
+            self.log.info(
+                f"Restarting eRPC proxy (attempt {self._restart_count}/"
+                f"{self.MAX_RESTART_ATTEMPTS})..."
+            )
+            # Re-use existing config
+            self._proxy._process = ERPCProcess(config=self._proxy._erpc_config)
+            self._proxy._process.start()
+            self.log.info(
+                f"eRPC proxy restarted (PID {self._proxy._process.pid})"
+            )
+            self._restart_count = 0  # Reset on success
+        except Exception as e:
+            self.log.warn(f"eRPC restart failed: {e}")
 
     def _handle_error(self, failure) -> None:
         self.log.warn(f"eRPC health check error:\n{failure.getTraceback().rstrip()}")

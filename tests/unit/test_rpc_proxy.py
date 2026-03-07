@@ -95,7 +95,7 @@ class TestCollectEndpoints:
             eth_endpoint="https://eth.example.com",
             polygon_endpoint="https://polygon.example.com",
             condition_blockchain_endpoints={},
-            domain=mock_domain,
+            domain=mock_domain, enrich=False,
         )
         assert 1 in result
         assert 137 in result
@@ -109,7 +109,7 @@ class TestCollectEndpoints:
             condition_blockchain_endpoints={
                 1: ["https://eth.example.com", "https://eth-backup.example.com"],
             },
-            domain=mock_domain,
+            domain=mock_domain, enrich=False,
         )
         assert result[1] == [
             "https://eth.example.com",
@@ -121,7 +121,7 @@ class TestCollectEndpoints:
             eth_endpoint=None,
             polygon_endpoint=None,
             condition_blockchain_endpoints={},
-            domain=mock_domain,
+            domain=mock_domain, enrich=False,
         )
         assert result == {}
 
@@ -132,10 +132,111 @@ class TestCollectEndpoints:
             condition_blockchain_endpoints={
                 42161: ["https://arbitrum.example.com"],
             },
-            domain=mock_domain,
+            domain=mock_domain, enrich=False,
         )
         assert 42161 in result
         assert 1 in result
+
+
+# ---------------------------------------------------------------------------
+# Chainlist enrichment
+# ---------------------------------------------------------------------------
+
+
+class TestChainlistEnrichment:
+
+    MOCK_CHAINLIST = {
+        1: ["https://public-eth-1.example.com", "https://public-eth-2.example.com"],
+        137: ["https://public-polygon.example.com"],
+        42161: ["https://public-arbitrum.example.com"],
+    }
+
+    def test_enrichment_appends_public_rpcs(self, mock_domain):
+        """Chainlist endpoints are appended after operator endpoints."""
+        with patch(
+            "nucypher.utilities.rpc_proxy._fetch_chainlist",
+            return_value=self.MOCK_CHAINLIST,
+        ):
+            result = collect_endpoints(
+                eth_endpoint="https://eth.example.com",
+                polygon_endpoint="https://polygon.example.com",
+                condition_blockchain_endpoints={},
+                domain=mock_domain,
+                enrich=True,
+            )
+        # Operator endpoints first, then public
+        assert result[1][0] == "https://eth.example.com"
+        assert "https://public-eth-1.example.com" in result[1]
+        assert "https://public-eth-2.example.com" in result[1]
+        assert result[137][0] == "https://polygon.example.com"
+        assert "https://public-polygon.example.com" in result[137]
+
+    def test_enrichment_only_for_configured_chains(self, mock_domain):
+        """Chainlist endpoints are NOT added for chains the operator didn't configure."""
+        with patch(
+            "nucypher.utilities.rpc_proxy._fetch_chainlist",
+            return_value=self.MOCK_CHAINLIST,
+        ):
+            result = collect_endpoints(
+                eth_endpoint="https://eth.example.com",
+                polygon_endpoint=None,
+                condition_blockchain_endpoints={},
+                domain=mock_domain,
+                enrich=True,
+            )
+        # Arbitrum not in operator config → should NOT appear
+        assert 42161 not in result
+        # Polygon not configured → should NOT appear
+        assert 137 not in result
+
+    def test_enrichment_deduplicates(self, mock_domain):
+        """If an operator URL is also in chainlist, it is not duplicated."""
+        chainlist = {1: ["https://eth.example.com", "https://public-eth.example.com"]}
+        with patch(
+            "nucypher.utilities.rpc_proxy._fetch_chainlist",
+            return_value=chainlist,
+        ):
+            result = collect_endpoints(
+                eth_endpoint="https://eth.example.com",
+                polygon_endpoint=None,
+                condition_blockchain_endpoints={},
+                domain=mock_domain,
+                enrich=True,
+            )
+        # eth.example.com appears only once
+        assert result[1].count("https://eth.example.com") == 1
+        assert "https://public-eth.example.com" in result[1]
+
+    def test_enrichment_disabled(self, mock_domain):
+        """enrich=False skips chainlist entirely."""
+        with patch(
+            "nucypher.utilities.rpc_proxy._fetch_chainlist",
+        ) as mock_fetch:
+            result = collect_endpoints(
+                eth_endpoint="https://eth.example.com",
+                polygon_endpoint=None,
+                condition_blockchain_endpoints={},
+                domain=mock_domain,
+                enrich=False,
+            )
+        mock_fetch.assert_not_called()
+        assert result[1] == ["https://eth.example.com"]
+
+    def test_enrichment_survives_fetch_failure(self, mock_domain):
+        """If chainlist fetch fails, operator endpoints are returned unchanged."""
+        with patch(
+            "nucypher.utilities.rpc_proxy._fetch_chainlist",
+            return_value={},
+        ):
+            result = collect_endpoints(
+                eth_endpoint="https://eth.example.com",
+                polygon_endpoint="https://polygon.example.com",
+                condition_blockchain_endpoints={},
+                domain=mock_domain,
+                enrich=True,
+            )
+        assert result[1] == ["https://eth.example.com"]
+        assert result[137] == ["https://polygon.example.com"]
 
 
 # ---------------------------------------------------------------------------

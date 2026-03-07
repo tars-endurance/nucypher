@@ -89,16 +89,117 @@ def build_erpc_config(
     return config
 
 
+_CHAINLIST_REPO = "nucypher/chainlist"
+_CHAINLIST_BRANCH = "main"
+_CHAINLIST_URL = (
+    "https://raw.githubusercontent.com/{repo}/{branch}/{domain}.json"
+)
+_CHAINLIST_TIMEOUT = 10  # seconds
+
+
+def _fetch_chainlist(domain_name: str) -> Dict[int, List[str]]:
+    """Fetch public RPC endpoints from nucypher/chainlist for a given domain.
+
+    Downloads ``{domain}.json`` from the chainlist repository at runtime.
+    Returns a mapping of chain_id → [url, ...].  On any failure (network,
+    parse, timeout), logs a warning and returns an empty dict — never
+    blocks or crashes startup.
+    """
+    import urllib.request
+
+    url = _CHAINLIST_URL.format(
+        repo=_CHAINLIST_REPO,
+        branch=_CHAINLIST_BRANCH,
+        domain=domain_name,
+    )
+    logger.info(
+        "Fetching public RPC endpoints from {url}",
+        url=url,
+    )
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "nucypher-ursula"},
+        )
+        with urllib.request.urlopen(req, timeout=_CHAINLIST_TIMEOUT) as resp:
+            import json as _json
+
+            raw = _json.loads(resp.read().decode())
+    except Exception as e:
+        logger.warn(
+            "Failed to fetch chainlist for {domain}: {error}",
+            domain=domain_name,
+            error=str(e),
+        )
+        return {}
+
+    # Keys are string chain IDs, values are lists of URLs
+    endpoints: Dict[int, List[str]] = {}
+    for chain_id_str, urls in raw.items():
+        try:
+            chain_id = int(chain_id_str)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(urls, list):
+            endpoints[chain_id] = [u for u in urls if isinstance(u, str)]
+
+    logger.info(
+        "Loaded {count} chains from chainlist ({total} total endpoints)",
+        count=len(endpoints),
+        total=sum(len(v) for v in endpoints.values()),
+    )
+    return endpoints
+
+
+def _enrich_with_chainlist(
+    endpoints: Dict[int, List[str]],
+    domain_name: str,
+) -> Dict[int, List[str]]:
+    """Merge public chainlist RPCs into operator-configured endpoints.
+
+    Operator endpoints are kept at the front of each list (highest
+    priority for eRPC).  Chainlist endpoints are appended as fallbacks,
+    but only for chains the operator is already using — we don't add
+    chains the operator didn't configure.
+    """
+    chainlist = _fetch_chainlist(domain_name)
+    if not chainlist:
+        return endpoints
+
+    enriched = {k: list(v) for k, v in endpoints.items()}
+    added = 0
+
+    for chain_id, operator_urls in enriched.items():
+        public_urls = chainlist.get(chain_id, [])
+        for url in public_urls:
+            if url not in operator_urls:
+                operator_urls.append(url)
+                added += 1
+
+    if added:
+        logger.info(
+            "Enriched operator endpoints with {added} public RPCs from chainlist",
+            added=added,
+        )
+    return enriched
+
+
 def collect_endpoints(
     eth_endpoint: Optional[str],
     polygon_endpoint: Optional[str],
     condition_blockchain_endpoints: Optional[Dict[int, List[str]]],
     domain,
+    enrich: bool = True,
 ) -> Dict[int, List[str]]:
     """Collect all chain endpoints from Ursula's configuration into a unified map.
 
     Mirrors the logic in ``UrsulaConfiguration.configure_condition_blockchain_endpoints``
     without modifying any config state.
+
+    When ``enrich`` is True (the default), appends free public RPC endpoints
+    from ``nucypher/chainlist`` as fallback upstreams for every chain the
+    operator has configured.
 
     Parameters
     ----------
@@ -109,7 +210,10 @@ def collect_endpoints(
     condition_blockchain_endpoints :
         Additional per-chain endpoints from config.
     domain :
-        The TACo domain (provides ``eth_chain.id`` and ``polygon_chain.id``).
+        The TACo domain (provides ``eth_chain.id``, ``polygon_chain.id``,
+        and ``name`` for chainlist lookup).
+    enrich :
+        If True, merge public endpoints from nucypher/chainlist.
 
     Returns
     -------
@@ -136,6 +240,11 @@ def collect_endpoints(
         chain_urls = endpoints.setdefault(polygon_chain_id, [])
         if polygon_endpoint not in chain_urls:
             chain_urls.append(polygon_endpoint)
+
+    # Enrich with public RPCs from nucypher/chainlist
+    if enrich:
+        domain_name = getattr(domain, "name", str(domain)).lower()
+        endpoints = _enrich_with_chainlist(endpoints, domain_name)
 
     return endpoints
 

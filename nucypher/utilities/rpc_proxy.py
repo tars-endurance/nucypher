@@ -566,19 +566,49 @@ class RPCProxy:
 
     def _background_health_wait(self, timeout: int) -> None:
         """Wait for eRPC health in a background thread, then hot-swap endpoints."""
-        try:
-            self._process.wait_for_health(timeout=timeout)
-        except Exception as e:
-            self.log.warn(
-                f"eRPC proxy did not become healthy within {timeout}s — "
-                f"continuing with direct endpoints. Error: {e}"
-            )
-            return
+        import time
 
-        # Hot-swap endpoints to route through the proxy
-        self._activate_endpoints()
-        self.log.info(
-            f"eRPC proxy is healthy — endpoints hot-swapped to proxy (PID {self._process.pid})"
+        health_url = self._erpc_config.health_url
+        deadline = time.monotonic() + timeout
+        check_count = 0
+        last_log = 0
+
+        while time.monotonic() < deadline:
+            # Check if process died
+            if not self._process.is_running:
+                self.log.warn(
+                    "eRPC process died during background health wait — "
+                    "continuing with direct endpoints"
+                )
+                return
+
+            # Check health
+            if self._process.is_healthy:
+                self.log.info(
+                    f"eRPC proxy is healthy after {check_count} checks — "
+                    f"hot-swapping endpoints (PID {self._process.pid})"
+                )
+                self._activate_endpoints()
+                return
+
+            check_count += 1
+            elapsed = int(time.monotonic() - (deadline - timeout))
+
+            # Log progress every 30 seconds
+            if elapsed - last_log >= 30:
+                last_log = elapsed
+                self.log.info(
+                    f"eRPC health wait: {elapsed}s elapsed, "
+                    f"{check_count} checks, health_url={health_url}, "
+                    f"process running={self._process.is_running}"
+                )
+
+            time.sleep(1)
+
+        self.log.warn(
+            f"eRPC proxy did not become healthy within {timeout}s "
+            f"({check_count} checks against {health_url}) — "
+            f"continuing with direct endpoints"
         )
 
     def _activate_endpoints(self) -> None:

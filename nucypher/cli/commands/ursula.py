@@ -775,17 +775,10 @@ def _configure_factory_proxy(emitter, character_options, config_file):
     chains = ", ".join(str(c) for c in sorted(status.get("chains", [])))
     pid = status.get("pid", "?")
     upstream_count = status.get("upstream_count", 0)
-    proxy_status = status.get("status", "unknown")
-    if proxy_status == "warming up":
-        emitter.message(
-            f"✓ eRPC Proxy (PID {pid}, {upstream_count} upstreams across {chains}, warming up in background)",
-            color="green",
-        )
-    else:
-        emitter.message(
-            f"✓ eRPC Proxy (PID {pid}, {upstream_count} upstreams across {chains})",
-            color="green",
-        )
+    emitter.message(
+        f"✓ eRPC Proxy (PID {pid}, {upstream_count} upstreams across {chains})",
+        color="green",
+    )
 
     # Print upstream details per chain
     upstreams = status.get("upstreams", {})

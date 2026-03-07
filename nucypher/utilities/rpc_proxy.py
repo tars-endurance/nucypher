@@ -494,29 +494,27 @@ class RPCProxy:
         """Whether the eRPC proxy is running and endpoints are rewritten."""
         return self._active
 
-    def start(self, health_timeout: int = 300, background: bool = True) -> bool:
-        """Start the eRPC proxy process.
+    def start(self, health_timeout: int = 300) -> bool:
+        """Start the eRPC proxy process and wait for it to be ready.
+
+        Blocks until eRPC is responding to HTTP requests (even 502),
+        then rewrites Ursula's endpoints to route through the proxy.
+        This must complete before ``create_character()`` calls
+        ``connect()`` — otherwise Ursula's initial ``get_block``
+        calls will fail.
 
         Parameters
         ----------
         health_timeout :
-            Maximum seconds to wait for eRPC to become healthy.
-            Default 300 (5 minutes) — generous because the Go binary
-            probes every upstream on startup.
-        background :
-            If True (default), the health wait and endpoint rewrite
-            happen in a background thread.  Ursula continues booting
-            with its original (direct) endpoints immediately.  Once
-            eRPC becomes healthy, endpoints are hot-swapped to the
-            proxy.  If the proxy never becomes healthy, Ursula keeps
-            using direct endpoints — no disruption.
+            Maximum seconds to wait for eRPC to start responding.
+            Default 300 (5 minutes).
 
-            If False, blocks until healthy (or times out).
-
-        Returns ``True`` if the proxy process was started (background)
-        or confirmed healthy (blocking).  ``False`` on immediate failure
-        (e.g. erpc-py not installed, process won't start at all).
+        Returns ``True`` if the proxy started and endpoints were
+        rewritten.  ``False`` on failure (falls back to direct
+        endpoints).
         """
+        import time
+
         try:
             from erpc import ERPCProcess
         except ImportError:
@@ -547,90 +545,57 @@ class RPCProxy:
 
         self.log.info(f"eRPC proxy process started (PID {self._process.pid})")
 
-        if background:
-            self.log.info(
-                f"Waiting for eRPC health in background (up to {health_timeout}s) — "
-                f"Ursula continues with direct endpoints until ready"
-            )
-            import threading
-            t = threading.Thread(
-                target=self._background_health_wait,
-                args=(health_timeout,),
-                daemon=True,
-                name="erpc-health-wait",
-            )
-            t.start()
-            return True
-        else:
-            return self._activate(health_timeout)
-
-    def _background_health_wait(self, timeout: int) -> None:
-        """Wait for eRPC health in a background thread, then hot-swap endpoints."""
-        import time
-
+        # Wait for eRPC to start responding to HTTP requests.
+        # The Go binary returns 502 while probing upstreams, then 200
+        # once at least one upstream is healthy.  We accept any HTTP
+        # response as "ready" — eRPC handles upstream failover internally.
         health_url = self._erpc_config.health_url
-        deadline = time.monotonic() + timeout
+        self.log.info(f"Waiting for eRPC to respond (up to {health_timeout}s)...")
+
+        deadline = time.monotonic() + health_timeout
         check_count = 0
         last_log = 0
 
         while time.monotonic() < deadline:
-            # Check if process died
             if not self._process.is_running:
                 self.log.warn(
-                    "eRPC process died during background health wait — "
-                    "continuing with direct endpoints"
+                    "eRPC process died during startup — using direct endpoints"
                 )
-                return
+                self._fallback()
+                return False
 
-            # Check if eRPC is responding (any HTTP response = alive).
-            # erpc-py's is_healthy requires 200, but eRPC returns 502
-            # while upstreams are still being probed. A 502 means the
-            # Go binary is listening and will route as upstreams come
-            # online — safe to hot-swap.
             if self._is_erpc_responding():
                 self.log.info(
-                    f"eRPC proxy is responding after {check_count} checks — "
-                    f"hot-swapping endpoints (PID {self._process.pid})"
+                    f"eRPC is responding after {check_count} checks — "
+                    f"rewriting endpoints to proxy"
                 )
-                self._activate_endpoints()
-                return
+                break
 
             check_count += 1
-            elapsed = int(time.monotonic() - (deadline - timeout))
+            elapsed = int(time.monotonic() - (deadline - health_timeout))
 
-            # Log progress every 30 seconds
-            if elapsed - last_log >= 30:
+            if elapsed - last_log >= 15:
                 last_log = elapsed
-
-                # Try to read any stderr output from eRPC Go binary
-                stderr_snippet = ""
-                try:
-                    inner = self._process._proc
-                    if inner and inner.stderr:
-                        import select
-                        if select.select([inner.stderr], [], [], 0)[0]:
-                            stderr_snippet = inner.stderr.read1(4096).decode(
-                                errors="replace"
-                            ).strip()
-                except Exception:
-                    pass
-
-                msg = (
-                    f"eRPC health wait: {elapsed}s elapsed, "
-                    f"{check_count} checks, health_url={health_url}, "
-                    f"process running={self._process.is_running}"
+                self.log.info(
+                    f"eRPC health wait: {elapsed}s elapsed, {check_count} checks, "
+                    f"health_url={health_url}"
                 )
-                if stderr_snippet:
-                    msg += f"\n  eRPC stderr: {stderr_snippet[:500]}"
-                self.log.info(msg)
 
             time.sleep(1)
+        else:
+            self.log.warn(
+                f"eRPC did not respond within {health_timeout}s — "
+                f"using direct endpoints"
+            )
+            self._fallback()
+            return False
 
-        self.log.warn(
-            f"eRPC proxy did not become healthy within {timeout}s "
-            f"({check_count} checks against {health_url}) — "
-            f"continuing with direct endpoints"
+        # Rewrite endpoints to route through the proxy
+        self._activate_endpoints()
+        self.log.info(
+            f"eRPC proxy active (PID {self._process.pid}), endpoints rewritten"
         )
+        return True
 
     def _is_erpc_responding(self) -> bool:
         """Check if eRPC is responding to HTTP requests (any status code).
@@ -675,23 +640,6 @@ class RPCProxy:
             self._health_check.start()
         except Exception:
             pass  # Health check is best-effort
-
-    def _activate(self, health_timeout: int) -> bool:
-        """Blocking health wait + endpoint activation (used when background=False)."""
-        try:
-            self._process.wait_for_health(timeout=health_timeout)
-        except Exception:
-            import traceback as _tb
-
-            msg = "eRPC proxy failed health check — falling back to direct endpoints:\n"
-            msg += _tb.format_exc().rstrip()
-            self.log.warn(msg)
-            self._fallback()
-            return False
-
-        self._activate_endpoints()
-        self.log.info(f"eRPC proxy active (PID {self._process.pid}), endpoints rewritten")
-        return True
 
     def stop(self) -> None:
         """Stop the eRPC proxy and restore original endpoints."""

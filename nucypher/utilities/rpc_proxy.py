@@ -597,11 +597,28 @@ class RPCProxy:
             # Log progress every 30 seconds
             if elapsed - last_log >= 30:
                 last_log = elapsed
-                self.log.info(
+
+                # Try to read any stderr output from eRPC Go binary
+                stderr_snippet = ""
+                try:
+                    inner = self._process._proc
+                    if inner and inner.stderr:
+                        import select
+                        if select.select([inner.stderr], [], [], 0)[0]:
+                            stderr_snippet = inner.stderr.read1(4096).decode(
+                                errors="replace"
+                            ).strip()
+                except Exception:
+                    pass
+
+                msg = (
                     f"eRPC health wait: {elapsed}s elapsed, "
                     f"{check_count} checks, health_url={health_url}, "
                     f"process running={self._process.is_running}"
                 )
+                if stderr_snippet:
+                    msg += f"\n  eRPC stderr: {stderr_snippet[:500]}"
+                self.log.info(msg)
 
             time.sleep(1)
 

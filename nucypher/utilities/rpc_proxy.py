@@ -664,6 +664,11 @@ class RPCProxy:
             info["upstream_count"] = sum(
                 len(urls) for urls in self._erpc_config.upstreams.values()
             )
+            # Full upstream map: chain_id → [url, ...]
+            info["upstreams"] = {
+                str(k): list(v)
+                for k, v in sorted(self._erpc_config.upstreams.items())
+            }
 
         if not self._active:
             info["status"] = "warming up" if self._process else "inactive"

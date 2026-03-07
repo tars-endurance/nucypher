@@ -774,17 +774,26 @@ def _configure_factory_proxy(emitter, character_options, config_file):
     status = BlockchainInterfaceFactory.proxy_status() or {}
     chains = ", ".join(str(c) for c in sorted(status.get("chains", [])))
     pid = status.get("pid", "?")
+    upstream_count = status.get("upstream_count", 0)
     proxy_status = status.get("status", "unknown")
     if proxy_status == "warming up":
         emitter.message(
-            f"✓ eRPC Proxy (PID {pid}, chains: {chains}, warming up in background)",
+            f"✓ eRPC Proxy (PID {pid}, {upstream_count} upstreams across {chains}, warming up in background)",
             color="green",
         )
     else:
         emitter.message(
-            f"✓ eRPC Proxy (PID {pid}, chains: {chains})",
+            f"✓ eRPC Proxy (PID {pid}, {upstream_count} upstreams across {chains})",
             color="green",
         )
+
+    # Print upstream details per chain
+    upstreams = status.get("upstreams", {})
+    for chain_id in sorted(upstreams.keys(), key=int):
+        urls = upstreams[chain_id]
+        emitter.message(f"  Chain {chain_id}:", color="green")
+        for url in urls:
+            emitter.message(f"    ↳ {url}", color="green")
 
 
 def _pre_launch_warnings(emitter, dev, force):

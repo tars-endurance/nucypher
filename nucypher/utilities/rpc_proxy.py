@@ -398,7 +398,12 @@ class RPCProxyHealthCheck:
                 f"{self.MAX_RESTART_ATTEMPTS})..."
             )
             # Re-use existing config
-            self._proxy._process = ERPCProcess(config=self._proxy._erpc_config)
+            import subprocess as _sp
+            self._proxy._process = ERPCProcess(
+                config=self._proxy._erpc_config,
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+            )
             self._proxy._process.start()
             self.log.info(
                 f"eRPC proxy restarted (PID {self._proxy._process.pid})"
@@ -556,7 +561,12 @@ class RPCProxy:
             return False
 
         try:
-            self._process = ERPCProcess(config=self._erpc_config)
+            import subprocess as _sp
+            self._process = ERPCProcess(
+                config=self._erpc_config,
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+            )
             self._process.start()
         except Exception:
             import traceback as _tb

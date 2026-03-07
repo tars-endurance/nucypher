@@ -582,10 +582,14 @@ class RPCProxy:
                 )
                 return
 
-            # Check health
-            if self._process.is_healthy:
+            # Check if eRPC is responding (any HTTP response = alive).
+            # erpc-py's is_healthy requires 200, but eRPC returns 502
+            # while upstreams are still being probed. A 502 means the
+            # Go binary is listening and will route as upstreams come
+            # online — safe to hot-swap.
+            if self._is_erpc_responding():
                 self.log.info(
-                    f"eRPC proxy is healthy after {check_count} checks — "
+                    f"eRPC proxy is responding after {check_count} checks — "
                     f"hot-swapping endpoints (PID {self._process.pid})"
                 )
                 self._activate_endpoints()
@@ -627,6 +631,28 @@ class RPCProxy:
             f"({check_count} checks against {health_url}) — "
             f"continuing with direct endpoints"
         )
+
+    def _is_erpc_responding(self) -> bool:
+        """Check if eRPC is responding to HTTP requests (any status code).
+
+        Unlike erpc-py's ``is_healthy`` which requires a 200, this accepts
+        any HTTP response (including 502 Bad Gateway) as evidence that the
+        Go binary is alive and listening.  eRPC returns 502 while upstreams
+        are still being probed, but it will route traffic as soon as any
+        upstream comes online.
+        """
+        from urllib.request import urlopen
+        from urllib.error import HTTPError, URLError
+
+        try:
+            urlopen(self._erpc_config.health_url, timeout=2)
+            return True
+        except HTTPError:
+            # 502, 503, etc. — eRPC is listening, just no healthy upstreams yet
+            return True
+        except (URLError, OSError):
+            # Connection refused, timeout — not listening yet
+            return False
 
     def _activate_endpoints(self) -> None:
         """Rewrite endpoints to route through the eRPC proxy."""

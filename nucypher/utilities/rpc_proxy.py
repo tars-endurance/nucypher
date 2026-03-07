@@ -514,11 +514,28 @@ class RPCProxy:
         """Whether the eRPC proxy is running and endpoints are rewritten."""
         return self._active
 
-    def start(self, health_timeout: int = 60) -> bool:
+    def start(self, health_timeout: int = 300, background: bool = True) -> bool:
         """Start the eRPC proxy process.
 
-        Returns ``True`` if the proxy started successfully, ``False`` on
-        fallback to direct endpoints.
+        Parameters
+        ----------
+        health_timeout :
+            Maximum seconds to wait for eRPC to become healthy.
+            Default 300 (5 minutes) — generous because the Go binary
+            probes every upstream on startup.
+        background :
+            If True (default), the health wait and endpoint rewrite
+            happen in a background thread.  Ursula continues booting
+            with its original (direct) endpoints immediately.  Once
+            eRPC becomes healthy, endpoints are hot-swapped to the
+            proxy.  If the proxy never becomes healthy, Ursula keeps
+            using direct endpoints — no disruption.
+
+            If False, blocks until healthy (or times out).
+
+        Returns ``True`` if the proxy process was started (background)
+        or confirmed healthy (blocking).  ``False`` on immediate failure
+        (e.g. erpc-py not installed, process won't start at all).
         """
         try:
             from erpc import ERPCProcess
@@ -529,7 +546,6 @@ class RPCProxy:
         try:
             self._process = ERPCProcess(config=self._erpc_config)
             self._process.start()
-            self._process.wait_for_health(timeout=health_timeout)
         except Exception:
             import traceback as _tb
 
@@ -541,7 +557,7 @@ class RPCProxy:
                         stderr = inner.stderr.read().decode(errors="replace")
                     except Exception:
                         pass
-            msg = "eRPC proxy failed to start — falling back to direct endpoints:\n"
+            msg = "eRPC proxy process failed to start — using direct endpoints:\n"
             msg += _tb.format_exc().rstrip()
             if stderr:
                 msg += f"\neRPC stderr: {stderr[:500]}"
@@ -549,6 +565,51 @@ class RPCProxy:
             self._fallback()
             return False
 
+        self.log.info(
+            "eRPC proxy process started (PID {pid})",
+            pid=self._process.pid,
+        )
+
+        if background:
+            self.log.info(
+                "Waiting for eRPC health in background (up to {timeout}s) — "
+                "Ursula continues with direct endpoints until ready",
+                timeout=health_timeout,
+            )
+            import threading
+            t = threading.Thread(
+                target=self._background_health_wait,
+                args=(health_timeout,),
+                daemon=True,
+                name="erpc-health-wait",
+            )
+            t.start()
+            return True
+        else:
+            return self._activate(health_timeout)
+
+    def _background_health_wait(self, timeout: int) -> None:
+        """Wait for eRPC health in a background thread, then hot-swap endpoints."""
+        try:
+            self._process.wait_for_health(timeout=timeout)
+        except Exception as e:
+            self.log.warn(
+                "eRPC proxy did not become healthy within {timeout}s — "
+                "continuing with direct endpoints. Error: {error}",
+                timeout=timeout,
+                error=str(e),
+            )
+            return
+
+        # Hot-swap endpoints to route through the proxy
+        self._activate_endpoints()
+        self.log.info(
+            "eRPC proxy is healthy — endpoints hot-swapped to proxy (PID {pid})",
+            pid=self._process.pid,
+        )
+
+    def _activate_endpoints(self) -> None:
+        """Rewrite endpoints to route through the eRPC proxy."""
         (
             self.eth_endpoint,
             self.polygon_endpoint,
@@ -560,17 +621,33 @@ class RPCProxy:
             condition_blockchain_endpoints=self._original_condition_endpoints,
             domain=self._domain,
         )
-
         self._active = True
-        self.log.info(f"eRPC proxy started (PID {self._process.pid})")
 
         # Start periodic health monitoring
         try:
             self._health_check = RPCProxyHealthCheck(self)
             self._health_check.start()
         except Exception:
-            pass  # Health check is best-effort, don't fail startup
+            pass  # Health check is best-effort
 
+    def _activate(self, health_timeout: int) -> bool:
+        """Blocking health wait + endpoint activation (used when background=False)."""
+        try:
+            self._process.wait_for_health(timeout=health_timeout)
+        except Exception:
+            import traceback as _tb
+
+            msg = "eRPC proxy failed health check — falling back to direct endpoints:\n"
+            msg += _tb.format_exc().rstrip()
+            self.log.warn(msg)
+            self._fallback()
+            return False
+
+        self._activate_endpoints()
+        self.log.info(
+            "eRPC proxy active (PID {pid}), endpoints rewritten",
+            pid=self._process.pid,
+        )
         return True
 
     def stop(self) -> None:

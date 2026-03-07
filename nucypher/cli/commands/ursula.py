@@ -774,10 +774,17 @@ def _configure_factory_proxy(emitter, character_options, config_file):
     status = BlockchainInterfaceFactory.proxy_status() or {}
     chains = ", ".join(str(c) for c in sorted(status.get("chains", [])))
     pid = status.get("pid", "?")
-    emitter.message(
-        f"✓ eRPC Proxy (PID {pid}, chains: {chains})",
-        color="green",
-    )
+    proxy_status = status.get("status", "unknown")
+    if proxy_status == "warming up":
+        emitter.message(
+            f"✓ eRPC Proxy (PID {pid}, chains: {chains}, warming up in background)",
+            color="green",
+        )
+    else:
+        emitter.message(
+            f"✓ eRPC Proxy (PID {pid}, chains: {chains})",
+            color="green",
+        )
 
 
 def _pre_launch_warnings(emitter, dev, force):

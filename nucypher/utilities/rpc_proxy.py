@@ -654,10 +654,22 @@ class RPCProxy:
         info: Dict[str, Any] = {
             "active": self._active,
         }
+
+        # PID and chains are available as soon as the process is started,
+        # even before the background health thread has activated the proxy.
+        if self._process:
+            info["pid"] = self._process.pid
+        if self._erpc_config and self._erpc_config.upstreams:
+            info["chains"] = sorted(self._erpc_config.upstreams.keys())
+            info["upstream_count"] = sum(
+                len(urls) for urls in self._erpc_config.upstreams.values()
+            )
+
         if not self._active:
+            info["status"] = "warming up" if self._process else "inactive"
             return info
 
-        info["pid"] = self._process.pid if self._process else None
+        info["status"] = "active"
         info["server_port"] = self._erpc_config.server_port
         info["metrics_port"] = self._erpc_config.metrics_port
         info["health_url"] = self.health_url
@@ -675,11 +687,5 @@ class RPCProxy:
             info["cache_policies"] = {
                 method: f"{ttl}s" for method, ttl in cache.method_ttls.items()
             }
-
-        # Upstream count
-        info["upstream_count"] = sum(
-            len(urls) for urls in self._erpc_config.upstreams.values()
-        )
-        info["chains"] = sorted(self._erpc_config.upstreams.keys())
 
         return info

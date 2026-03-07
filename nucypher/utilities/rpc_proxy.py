@@ -598,25 +598,48 @@ class RPCProxy:
         return True
 
     def _is_erpc_responding(self) -> bool:
-        """Check if eRPC is responding to HTTP requests (any status code).
+        """Check if eRPC can actually proxy an RPC request.
 
-        Unlike erpc-py's ``is_healthy`` which requires a 200, this accepts
-        any HTTP response (including 502 Bad Gateway) as evidence that the
-        Go binary is alive and listening.  eRPC returns 502 while upstreams
-        are still being probed, but it will route traffic as soon as any
-        upstream comes online.
+        Sends a real ``eth_chainId`` JSON-RPC call through the proxy
+        for the first configured chain.  Returns True only if we get
+        a valid JSON-RPC response — not just an HTTP response.
+
+        This is stricter than checking the health endpoint because
+        eRPC returns 502 immediately on startup before any upstream
+        is probed.  We need at least one working upstream.
         """
-        from urllib.request import urlopen
+        import json as _json
+        from urllib.request import Request, urlopen
         from urllib.error import HTTPError, URLError
 
+        # Pick the first chain to test
+        chains = sorted(self._erpc_config.upstreams.keys())
+        if not chains:
+            return False
+
+        test_chain = chains[0]
+        project_id = self._erpc_config.project_id
+        port = self._erpc_config.server_port
+        url = f"http://127.0.0.1:{port}/{project_id}/evm/{test_chain}"
+
+        payload = _json.dumps({
+            "jsonrpc": "2.0",
+            "method": "eth_chainId",
+            "params": [],
+            "id": 1,
+        }).encode()
+
         try:
-            urlopen(self._erpc_config.health_url, timeout=2)
-            return True
-        except HTTPError:
-            # 502, 503, etc. — eRPC is listening, just no healthy upstreams yet
-            return True
-        except (URLError, OSError):
-            # Connection refused, timeout — not listening yet
+            req = Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                body = _json.loads(resp.read().decode())
+                # Valid JSON-RPC response has "result"
+                return "result" in body
+        except (HTTPError, URLError, OSError, ValueError, KeyError):
             return False
 
     def _activate_endpoints(self) -> None:

@@ -144,13 +144,9 @@ def _fetch_chainlist(domain_name: str) -> Dict[int, List[str]]:
     return endpoints
 
 
-_MAX_PUBLIC_ENDPOINTS_PER_CHAIN = 5
-
-
 def _enrich_with_chainlist(
     endpoints: Dict[int, List[str]],
     domain_name: str,
-    max_per_chain: int = _MAX_PUBLIC_ENDPOINTS_PER_CHAIN,
 ) -> Dict[int, List[str]]:
     """Merge public chainlist RPCs into operator-configured endpoints.
 
@@ -158,10 +154,6 @@ def _enrich_with_chainlist(
     priority for eRPC).  Chainlist endpoints are appended as fallbacks,
     but only for chains the operator is already using — we don't add
     chains the operator didn't configure.
-
-    At most ``max_per_chain`` public endpoints are added per chain to
-    keep the eRPC startup time reasonable (the Go binary probes each
-    upstream during initialization).
     """
     chainlist = _fetch_chainlist(domain_name)
     if not chainlist:
@@ -172,19 +164,14 @@ def _enrich_with_chainlist(
 
     for chain_id, operator_urls in enriched.items():
         public_urls = chainlist.get(chain_id, [])
-        chain_added = 0
         for url in public_urls:
-            if chain_added >= max_per_chain:
-                break
             if url not in operator_urls:
                 operator_urls.append(url)
                 added += 1
-                chain_added += 1
 
     if added:
         logger.info(
-            f"Enriched operator endpoints with {added} public RPCs "
-            f"from chainlist (max {max_per_chain} per chain)"
+            f"Enriched operator endpoints with {added} public RPCs from chainlist"
         )
     return enriched
 

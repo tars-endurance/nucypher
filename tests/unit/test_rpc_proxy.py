@@ -10,6 +10,7 @@ import pytest
 from nucypher.utilities.rpc_proxy import (
     NUCYPHER_ENVVAR_ERPC_ENABLED,
     RPCProxy,
+    RPCProxyHealthCheck,
     build_erpc_config,
     collect_endpoints,
     is_erpc_enabled,
@@ -565,3 +566,152 @@ class TestBlockchainInterfaceFactoryProxy:
         BlockchainInterfaceFactory.shutdown_proxy()
         proxy.stop.assert_called_once()
         assert BlockchainInterfaceFactory._proxy is None
+
+
+# ---------------------------------------------------------------------------
+# Process lifecycle — crash detection, restart, fallback
+# ---------------------------------------------------------------------------
+
+
+class TestProcessLifecycle:
+    """Verify that eRPC process death does not take down Ursula.
+
+    These tests cover the three defense layers:
+    1. Health check detects process death
+    2. Auto-restart attempts to bring eRPC back
+    3. Fallback to direct endpoints if restart fails
+    """
+
+    def _make_proxy(self, mock_domain):
+        """Create an RPCProxy with mocked erpc-py."""
+        from nucypher.utilities.rpc_proxy import RPCProxy
+
+        with patch.dict(sys.modules, {"erpc": _erpc_stub}):
+            proxy = RPCProxy(
+                eth_endpoint="https://sepolia.infura.io/v3/KEY",
+                polygon_endpoint="https://polygon-amoy.infura.io/v3/KEY",
+                condition_blockchain_endpoints={
+                    84532: ["https://base-sepolia.infura.io/v3/KEY"],
+                },
+                domain=mock_domain,
+            )
+        return proxy
+
+    def test_health_check_detects_dead_process(self, mock_domain):
+        """Health check run() calls _attempt_restart when process dies."""
+        proxy = self._make_proxy(mock_domain)
+        proxy._active = True
+
+        # Simulate a dead process
+        mock_proc = MagicMock()
+        mock_proc.is_running = False
+        proxy._process = mock_proc
+
+        health = RPCProxyHealthCheck(proxy)
+        with patch.object(health, '_attempt_restart') as mock_restart:
+            health.run()
+            mock_restart.assert_called_once()
+
+    def test_health_check_no_restart_when_inactive(self, mock_domain):
+        """No restart triggered if proxy was never activated."""
+        proxy = self._make_proxy(mock_domain)
+        proxy._active = False
+
+        mock_proc = MagicMock()
+        mock_proc.is_running = False
+        proxy._process = mock_proc
+
+        health = RPCProxyHealthCheck(proxy)
+        with patch.object(health, '_attempt_restart') as mock_restart:
+            health.run()
+            mock_restart.assert_not_called()
+
+    def test_restart_success(self, mock_domain):
+        """Successful restart creates new process on same port."""
+        proxy = self._make_proxy(mock_domain)
+        proxy._active = True
+
+        mock_new_proc = MagicMock()
+        mock_new_proc.pid = 42
+        _erpc_stub.ERPCProcess.return_value = mock_new_proc
+
+        health = RPCProxyHealthCheck(proxy)
+        with patch.dict(sys.modules, {"erpc": _erpc_stub}):
+            health._attempt_restart()
+
+        mock_new_proc.start.assert_called_once()
+        assert proxy._process is mock_new_proc
+        assert health._restart_count == 0  # Reset on success
+
+    def test_restart_gives_up_after_max_attempts(self, mock_domain):
+        """After MAX_RESTART_ATTEMPTS, stops trying."""
+        proxy = self._make_proxy(mock_domain)
+        proxy._active = True
+
+        health = RPCProxyHealthCheck(proxy)
+        health._restart_count = RPCProxyHealthCheck.MAX_RESTART_ATTEMPTS
+
+        old_process = proxy._process
+        with patch.dict(sys.modules, {"erpc": _erpc_stub}):
+            health._attempt_restart()
+
+        # Should NOT have tried to create new process
+        assert proxy._process is old_process
+
+    def test_restart_failure_increments_count(self, mock_domain):
+        """Failed restart increments counter, doesn't crash."""
+        proxy = self._make_proxy(mock_domain)
+        proxy._active = True
+
+        _erpc_stub.ERPCProcess.side_effect = RuntimeError("port in use")
+
+        health = RPCProxyHealthCheck(proxy)
+        with patch.dict(sys.modules, {"erpc": _erpc_stub}):
+            health._attempt_restart()  # Should not raise
+
+        assert health._restart_count == 1
+
+        # Clean up
+        _erpc_stub.ERPCProcess.side_effect = None
+
+    def test_fallback_restores_direct_endpoints(self, mock_domain):
+        """_fallback() restores original operator endpoints."""
+        proxy = self._make_proxy(mock_domain)
+
+        original_eth = proxy.eth_endpoint
+        original_polygon = proxy.polygon_endpoint
+
+        # Simulate active proxy with rewritten endpoints
+        proxy.eth_endpoint = "http://127.0.0.1:4000/taco-ursula/evm/11155111"
+        proxy.polygon_endpoint = "http://127.0.0.1:4000/taco-ursula/evm/80002"
+        proxy._active = True
+
+        proxy._fallback()
+
+        assert proxy.eth_endpoint == original_eth
+        assert proxy.polygon_endpoint == original_polygon
+        assert not proxy._active
+        assert proxy._process is None
+
+    def test_stop_does_not_raise_on_dead_process(self, mock_domain):
+        """stop() handles already-dead process gracefully."""
+        proxy = self._make_proxy(mock_domain)
+
+        mock_proc = MagicMock()
+        mock_proc.is_running = False
+        proxy._process = mock_proc
+        proxy._active = True
+
+        # Should not raise
+        proxy.stop()
+        assert not proxy.is_active
+
+    def test_start_returns_false_when_erpc_missing(self, mock_domain):
+        """start() returns False if erpc-py is not installed."""
+        proxy = self._make_proxy(mock_domain)
+
+        with patch.dict(sys.modules, {"erpc": None}):
+            result = proxy.start()
+
+        assert result is False
+        assert not proxy.is_active
